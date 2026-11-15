@@ -1,0 +1,15 @@
+name = "arglet"
+version = "1.0.0"
+description = "A little command-line argument parser for Pooka"
+authors = ["Peregrine Finch"]
+licences = ["Apache-2.0"]
+repository = { type = "github", user = "peregrinefinch", repo = "arglet" }
+links = [
+  { title = "Issues", href = "https://github.com/peregrinefinch/arglet/issues" },
+  { title = "Compiler", href = "https://github.com/pooka-lang/pooka" },
+]
+
+[dependencies]
+pooka_stdlib = ">= 0.2.0 and < 1.0.0"
+
+[dev-dependencies]

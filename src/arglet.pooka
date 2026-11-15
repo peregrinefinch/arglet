@@ -1,0 +1,400 @@
+//// A little argument parser, small enough to read over one cup of tea.
+////
+//// Arglet does two things. It fetches the command line from the Erlang
+//// runtime, and it sorts those words into flags, values and positionals,
+//// according to a short list of things you told it to expect.
+////
+//// ```pooka
+//// import arglet
+////
+//// main() {
+////   let expected = [
+////     arglet.flag("verbose", "v", "Say more about what is happening"),
+////     arglet.value("output", "o", "Where to write the result")
+////   ]
+////   match arglet.parse(arglet.arguments(), expected) {
+////     Ok(args) -> {
+////       echo args.positionals
+////       echo args.has("verbose")
+////       echo args.get("output")
+////       Nil
+////     }
+////     Error(problem) -> {
+////       echo arglet.describe(problem)
+////       Nil
+////     }
+////   }
+//// }
+//// ```
+////
+//// For `pooka run -- build -v --output=out.txt`, `args.positionals` is
+//// `["build"]`, `args.has("verbose")` is `True`, and `args.get("output")` is
+//// `Some("out.txt")`.
+
+// SPDX-License-Identifier: Apache-2.0
+
+module arglet
+
+import pooka/list
+import pooka/string
+
+/// The command line, with each traveller in its own seat.
+///
+/// `runtime` is the Erlang executable. `program` is the escript path, or the
+/// working directory outside an escript. `arguments` holds the words the user
+/// typed, without runtime options or the escript path.
+class Argv(runtime: String, program: String, arguments: List(String))
+
+external _ArgletFfi from erlang "arglet_ffi" {
+  load() -> #(String, String, List(String))
+}
+
+/// Read the current invocation without parsing it.
+///
+/// ```pooka
+/// import arglet
+///
+/// main() {
+///   echo arglet.load().program
+/// }
+/// ```
+load() -> Argv {
+  let #(runtime, program, arguments) = _ArgletFfi.load()
+  Argv(runtime, program, arguments)
+}
+
+/// Only the words the user typed, in the order they typed them.
+///
+/// ```pooka
+/// import arglet
+///
+/// main() {
+///   echo arglet.arguments()
+/// }
+/// ```
+arguments() -> List(String) {
+  load().arguments
+}
+
+/// Something the parser should expect. Make one with `flag` or `value`.
+class Spec {}
+
+/// A switch that is either present or absent, such as `--verbose`.
+class Flag(name: String, short: String, help: String) is Spec
+
+/// An option that carries a value, such as `--output out.txt`.
+class Value(name: String, short: String, help: String) is Spec
+
+/// Expect a switch. `name` is used as `--name`, and `short` as `-s`. Pass `""`
+/// for `short` when there is no short form.
+///
+/// ```pooka
+/// import arglet
+///
+/// let quiet = arglet.flag("quiet", "q", "Say less")
+/// ```
+flag(name: String, short: String, help: String) -> Spec {
+  Flag(name, short, help)
+}
+
+/// Expect an option with a value: `--name value`, `--name=value`, `-s value`
+/// or `-svalue`. Pass `""` for `short` when there is no short form.
+///
+/// ```pooka
+/// import arglet
+///
+/// let output = arglet.value("output", "o", "Where to write the result")
+/// ```
+value(name: String, short: String, help: String) -> Spec {
+  Value(name, short, help)
+}
+
+/// The command line after sorting.
+///
+/// `flags` lists each switch once per appearance, so `-vvv` appears three
+/// times. `values` pairs each option name with its value, in order.
+/// `positionals` holds everything else, including every word after `--`.
+/// Names are always the long ones, whichever form the user typed.
+class Parsed(
+  flags: List(String),
+  values: List(#(String, String)),
+  positionals: List(String),
+) {
+  /// Was this switch given at least once?
+  has(name: String) -> Bool {
+    list.contains(flags, name)
+  }
+
+  /// How many times was this switch given? Useful for `-vvv`.
+  count(name: String) -> Int {
+    list.length(list.filter(flags, fn(flag: String) { flag == name }))
+  }
+
+  /// The value of an option. If it was given more than once, the last one
+  /// wins, as it does in most command line tools.
+  get(name: String) -> Option(String) {
+    list.last(all(name))
+  }
+
+  /// Every value given for an option, in order.
+  all(name: String) -> List(String) {
+    list.filter_map(values, fn(pair: #(String, String)) {
+      let #(key, found) = pair
+      match key == name {
+        True -> Some(found)
+        False -> None
+      }
+    })
+  }
+}
+
+/// Why a command line could not be sorted.
+class ArgError {}
+
+/// An option nobody told the parser to expect, written as the user typed it.
+class UnknownOption(option: String) is ArgError
+
+/// A value option at the very end, with nothing after it.
+class MissingValue(option: String) is ArgError
+
+/// A switch that was handed a value, as in `--verbose=yes`.
+class UnexpectedValue(option: String) is ArgError
+
+/// A sentence for the person at the keyboard.
+///
+/// ```pooka
+/// import arglet
+///
+/// assert arglet.describe(arglet.UnknownOption("--colour")) == "unknown option --colour"
+/// ```
+describe(problem: ArgError) -> String {
+  match problem {
+    UnknownOption(option) -> "unknown option " + option
+    MissingValue(option) -> "option " + option + " needs a value"
+    UnexpectedValue(option) -> "option " + option + " does not take a value"
+  }
+}
+
+/// Sort a list of words into flags, values and positionals.
+///
+/// - `--name` and `-n` are switches or options, as described by `specs`.
+/// - `--name=value`, `--name value`, `-n value` and `-nvalue` give a value.
+/// - Short switches can share a dash: `-qv` is `-q -v`.
+/// - `--` ends the options. Every word after it is a positional.
+/// - `-` alone, and negative numbers such as `-5`, are positionals.
+///
+/// ```pooka
+/// import arglet
+///
+/// let expected = [arglet.flag("quiet", "q", ""), arglet.value("name", "n", "")]
+/// let assert Ok(args) = arglet.parse(["greet", "-q", "--name", "Ada"], expected)
+/// assert args.positionals == ["greet"]
+/// assert args.has("quiet")
+/// assert args.get("name") == Some("Ada")
+/// ```
+parse(arguments: List(String), specs: List(Spec)) -> Result(Parsed, ArgError) {
+  _parse(arguments, specs, Parsed([], [], []))
+}
+
+/// One line per expected option, for a `--help` screen.
+///
+/// ```pooka
+/// import arglet
+///
+/// let expected = [arglet.flag("quiet", "q", "Say less")]
+/// assert arglet.usage(expected) == "  -q, --quiet  Say less"
+/// ```
+usage(specs: List(Spec)) -> String {
+  let names = list.map(specs, _label)
+  let width = list.fold(names, 0, fn(widest, label: String) {
+    match string.length(label) > widest {
+      True -> string.length(label)
+      False -> widest
+    }
+  })
+  let lines = list.map(specs, fn(spec: Spec) {
+    let label = _label(spec)
+    let padding = string.repeat(" ", width - string.length(label))
+    string.trim_end("  " + label + padding + "  " + _help(spec))
+  })
+  lines |> string.join("\n")
+}
+
+// --- sorting ------------------------------------------------------------------
+
+// Results are collected newest first, and turned around once at the end.
+_parse(arguments: List(String), specs: List(Spec), found: Parsed) -> Result(
+  Parsed,
+  ArgError
+) {
+  match arguments {
+    [] -> Ok(_finish(found, []))
+    ["--", ..rest] -> Ok(_finish(found, rest))
+    [word, ..rest] -> match _is_long(word) {
+      True -> _long(word, rest, specs, found)
+      False -> match _is_short(word, specs) {
+        True -> _short(_letters(word), rest, specs, found)
+        False -> _parse(rest, specs, _positional(found, word))
+      }
+    }
+  }
+}
+
+_finish(found: Parsed, rest: List(String)) -> Parsed {
+  Parsed(
+    list.reverse(found.flags),
+    list.reverse(found.values),
+    list.concat(list.reverse(found.positionals), rest)
+  )
+}
+
+_positional(found: Parsed, word: String) -> Parsed {
+  Parsed(found.flags, found.values, list.prepend(found.positionals, word))
+}
+
+_switched(found: Parsed, name: String) -> Parsed {
+  Parsed(list.prepend(found.flags, name), found.values, found.positionals)
+}
+
+_valued(found: Parsed, name: String, given: String) -> Parsed {
+  Parsed(
+    found.flags,
+    list.prepend(found.values, #(name, given)),
+    found.positionals
+  )
+}
+
+_is_long(word: String) -> Bool {
+  string.starts_with(word, "--") && string.length(word) > 2
+}
+
+// `-` alone is a positional, by long tradition the name of standard input. A
+// word such as `-5` is a number, unless somebody really did declare `-5`.
+_is_short(word: String, specs: List(Spec)) -> Bool {
+  match _letters(word) {
+    [first, ..] if string.starts_with(word, "-") -> match _by_short(
+      specs,
+      first
+    ) {
+      Some(_) -> True
+      None -> !_is_digit(first)
+    }
+    _ -> False
+  }
+}
+
+_is_digit(letter: String) -> Bool {
+  string.contains("0123456789.", letter)
+}
+
+// The letters after the single dash, one code point each.
+_letters(word: String) -> List(String) {
+  string.split(string.slice(word, 1, string.length(word)), "")
+}
+
+_long(word: String, rest: List(String), specs: List(Spec), found: Parsed) -> Result(
+  Parsed,
+  ArgError
+) {
+  let body = string.slice(word, 2, string.length(word))
+  let #(name, attached) = match string.split(body, "=") {
+    [name] -> #(name, None)
+    [name, ..parts] -> #(name, Some(string.join(parts, "=")))
+    [] -> #(body, None)
+  }
+  match _by_name(specs, name) {
+    None -> Error(UnknownOption("--" + name))
+    Some(Flag(_, _, _)) -> match attached {
+      None -> _parse(rest, specs, _switched(found, name))
+      Some(_) -> Error(UnexpectedValue("--" + name))
+    }
+    Some(Value(_, _, _)) -> match attached {
+      Some(given) -> _parse(rest, specs, _valued(found, name, given))
+      None -> {
+        let #(given, after) = _next_value(rest, "--" + name)?
+        _parse(after, specs, _valued(found, name, given))
+      }
+    }
+  }
+}
+
+_short(
+  letters: List(String),
+  rest: List(String),
+  specs: List(Spec),
+  found: Parsed
+) -> Result(Parsed, ArgError) {
+  match letters {
+    [] -> _parse(rest, specs, found)
+    [letter, ..others] -> match _by_short(specs, letter) {
+      None -> Error(UnknownOption("-" + letter))
+      Some(Flag(name, _, _)) -> _short(
+        others,
+        rest,
+        specs,
+        _switched(found, name)
+      )
+      Some(Value(name, _, _)) -> match others {
+        [] -> {
+          let #(given, after) = _next_value(rest, "-" + letter)?
+          _parse(after, specs, _valued(found, name, given))
+        }
+        _ -> _parse(rest, specs, _valued(found, name, string.join(others, "")))
+      }
+    }
+  }
+}
+
+// Both spellings take the next word literally, even when it begins with a dash.
+// Keep the missing-value error here; ? returns it unchanged to either caller.
+_next_value(arguments: List(String), option: String) -> Result(
+  #(String, List(String)),
+  ArgError
+) {
+  match arguments {
+    [given, ..rest] -> Ok(#(given, rest))
+    [] -> Error(MissingValue(option))
+  }
+}
+
+// --- specs --------------------------------------------------------------------
+
+_name(spec: Spec) -> String {
+  match spec {
+    Flag(name, _, _) -> name
+    Value(name, _, _) -> name
+  }
+}
+
+_short_name(spec: Spec) -> String {
+  match spec {
+    Flag(_, short, _) -> short
+    Value(_, short, _) -> short
+  }
+}
+
+_help(spec: Spec) -> String {
+  match spec {
+    Flag(_, _, help) -> help
+    Value(_, _, help) -> help
+  }
+}
+
+_by_name(specs: List(Spec), name: String) -> Option(Spec) {
+  list.find(specs, fn(spec: Spec) { _name(spec) == name })
+}
+
+_by_short(specs: List(Spec), letter: String) -> Option(Spec) {
+  list.find(specs, fn(spec: Spec) { _short_name(spec) == letter })
+}
+
+_label(spec: Spec) -> String {
+  let long = match spec {
+    Flag(name, _, _) -> "--" + name
+    Value(name, _, _) -> "--" + name + " <value>"
+  }
+  match _short_name(spec) {
+    "" -> "    " + long
+    short -> "-" + short + ", " + long
+  }
+}
