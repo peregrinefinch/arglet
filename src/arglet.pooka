@@ -43,7 +43,7 @@ import pooka/string
 /// `runtime` is the Erlang executable. `program` is the escript path, or the
 /// working directory outside an escript. `arguments` holds the words the user
 /// typed, without runtime options or the escript path.
-class Argv(runtime: String, program: String, arguments: List(String))
+class Arglet(runtime: String, program: String, arguments: List(String))
 
 external _ArgletFfi from erlang "arglet_ffi" {
   load() -> #(String, String, List(String))
@@ -58,9 +58,9 @@ external _ArgletFfi from erlang "arglet_ffi" {
 ///   echo arglet.load().program
 /// }
 /// ```
-load() -> Argv {
+load() -> Arglet {
   let #(runtime, program, arguments) = _ArgletFfi.load()
-  Argv(runtime, program, arguments)
+  Arglet(runtime, program, arguments)
 }
 
 /// Only the words the user typed, in the order they typed them.

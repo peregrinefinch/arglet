@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Rename the invocation class returned by `load()` from `Argv` to `Arglet`.
+
 ## 1.0.0
 
 - Initial release of `arglet`.

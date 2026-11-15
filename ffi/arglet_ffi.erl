@@ -17,7 +17,7 @@
 
 %% Read the guest list without rearranging it.
 %%
-%% Return the three pieces in the order expected by the Pooka Argv wrapper.
+%% Return the three pieces in the order expected by the Pooka Arglet wrapper.
 %%
 %% The executable path comes from the VM's bindir and progname boot arguments.
 %% For an escript, the first plain argument is its script path; keep it out of

@@ -218,7 +218,11 @@ test "error values keep their distinct types" {
 }
 
 test "the invocation has a runtime and a program location" {
-  let invocation = arglet.load()
+  let invocation: arglet.Arglet = arglet.load()
+  let assert arglet.Arglet(runtime, program, arguments) = invocation
+  assert runtime == invocation.runtime
+  assert program == invocation.program
+  assert arguments == invocation.arguments
   assert invocation.runtime != ""
   assert invocation.program != ""
   assert invocation.arguments == arglet.arguments()
