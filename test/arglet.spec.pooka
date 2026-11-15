@@ -1,0 +1,225 @@
+//// Give the little parser a few untidy guest lists.
+////
+//// Keep the order of words, the spelling of mistakes and the last value
+//// visible. A command line is small, but it has plenty of corners.
+
+// SPDX-License-Identifier: Apache-2.0
+
+module arglet_test
+
+import arglet
+
+_expected() -> List(arglet.Spec) {
+  [
+    arglet.flag("verbose", "v", "Say more"),
+    arglet.flag("quiet", "q", "Say less"),
+    arglet.value("output", "o", "Where to write"),
+    arglet.value("define", "", "Set a name")
+  ]
+}
+
+_parse(words: List(String)) -> arglet.Parsed {
+  let assert Ok(args) = arglet.parse(words, _expected())
+  args
+}
+
+_problem(words: List(String)) -> String {
+  let assert Error(problem) = arglet.parse(words, _expected())
+  arglet.describe(problem)
+}
+
+test "no words, nothing found" {
+  let args = _parse([])
+  assert args.flags == []
+  assert args.values == []
+  assert args.positionals == []
+}
+
+test "words without dashes are positionals, in order" {
+  assert _parse(["build", "north", "south"]).positionals == [
+    "build",
+    "north",
+    "south"
+  ]
+}
+
+test "long and short switches" {
+  let args = _parse(["--verbose", "-q"])
+  assert args.has("verbose")
+  assert args.has("quiet")
+  assert !_parse(["-q"]).has("verbose")
+}
+
+test "short switches can share a dash" {
+  let args = _parse(["-qv"])
+  assert args.has("quiet")
+  assert args.has("verbose")
+}
+
+test "a repeated switch is counted" {
+  assert _parse(["-vvv", "--verbose"]).count("verbose") == 4
+  assert _parse([]).count("verbose") == 0
+}
+
+test "a value can arrive four ways" {
+  assert _parse(["--output", "a.txt"]).get("output") == Some("a.txt")
+  assert _parse(["--output=b.txt"]).get("output") == Some("b.txt")
+  assert _parse(["-o", "c.txt"]).get("output") == Some("c.txt")
+  assert _parse(["-od.txt"]).get("output") == Some("d.txt")
+}
+
+test "a value may contain an equals sign" {
+  assert _parse(["--define=colour=orange"]).get("define") == Some(
+    "colour=orange"
+  )
+}
+
+test "a value may look like an option" {
+  assert _parse(["--output", "--verbose"]).get("output") == Some("--verbose")
+}
+
+test "the last value wins, and all of them are kept" {
+  let args = _parse(["-o", "first", "--output", "second"])
+  assert args.get("output") == Some("second")
+  assert args.all("output") == ["first", "second"]
+  assert args.get("define") == None
+}
+
+test "a switch then a value behind one dash" {
+  let args = _parse(["-vo", "out.txt", "file"])
+  assert args.has("verbose")
+  assert args.get("output") == Some("out.txt")
+  assert args.positionals == ["file"]
+}
+
+test "two dashes end the options" {
+  let args = _parse(["-v", "--", "-q", "--output"])
+  assert args.has("verbose")
+  assert !args.has("quiet")
+  assert args.positionals == ["-q", "--output"]
+}
+
+test "a lone dash and negative numbers are positionals" {
+  assert _parse(["-", "-5", "-2.5"]).positionals == ["-", "-5", "-2.5"]
+}
+
+test "names are reported in their long form" {
+  assert _parse(["-q"]).flags == ["quiet"]
+  assert _parse(["-o", "x"]).values == [#("output", "x")]
+}
+
+test "an unknown option is named as it was typed" {
+  assert _problem(["--colour"]) == "unknown option --colour"
+  assert _problem(["-x"]) == "unknown option -x"
+  assert _problem(["-vx"]) == "unknown option -x"
+}
+
+test "a value option at the end needs a value" {
+  assert _problem(["--output"]) == "option --output needs a value"
+  assert _problem(["-o"]) == "option -o needs a value"
+}
+
+test "a switch does not take a value" {
+  assert _problem(["--verbose=yes"]) == "option --verbose does not take a value"
+}
+
+test "usage lists every option, aligned" {
+  assert arglet.usage(_expected()) == "  -v, --verbose         Say more\n  -q, --quiet           Say less\n  -o, --output <value>  Where to write\n      --define <value>  Set a name"
+}
+
+test "the runner supplies no arguments of its own" {
+  assert arglet.arguments() == []
+  assert arglet.load().runtime != ""
+}
+
+// ? must hand back the original error, even after earlier flags were read.
+test "missing values propagate from either spelling after earlier options" {
+  let assert Error(long) = arglet.parse(["-v", "--output"], _expected())
+  let assert arglet.MissingValue("--output") = long
+  let assert Error(short) = arglet.parse(["--quiet", "-vo"], _expected())
+  let assert arglet.MissingValue("-o") = short
+}
+
+test "the next value remains literal even when it looks like an option" {
+  assert _parse(["--output", "--quiet"]).get("output") == Some("--quiet")
+  assert !_parse(["--output", "--quiet"]).has("quiet")
+  assert _parse(["-o", "--"]).get("output") == Some("--")
+  assert _parse(["-o", ""]).get("output") == Some("")
+  assert _parse(["--output="]).get("output") == Some("")
+  assert _parse(["-o-x"]).get("output") == Some("-x")
+}
+
+test "positionals keep their places around options" {
+  let args = _parse(["first", "-v", "second", "-oout", "third", "--", "-q", ""])
+  assert args.flags == ["verbose"]
+  assert args.values == [#("output", "out")]
+  assert args.positionals == ["first", "second", "third", "-q", ""]
+}
+
+test "an empty word is still a positional" {
+  assert _parse(["", "file", ""]).positionals == ["", "file", ""]
+}
+
+test "the option terminator can arrive first or last" {
+  assert _parse(["--", "--", "-v"]).positionals == ["--", "-v"]
+  assert _parse(["-v", "--"]).positionals == []
+  assert _parse(["-v", "--"]).flags == ["verbose"]
+}
+
+test "long names must match completely and keep their case" {
+  assert _problem(["--ver"]) == "unknown option --ver"
+  assert _problem(["--Verbose"]) == "unknown option --Verbose"
+  assert _problem(["---verbose"]) == "unknown option ---verbose"
+}
+
+test "a short value consumes the rest of its group" {
+  let args = _parse(["-vovq"])
+  assert args.flags == ["verbose"]
+  assert args.get("output") == Some("vq")
+}
+
+test "a declared digit switch takes precedence over negative numbers" {
+  let assert Ok(args) = arglet.parse(
+    ["-5", "-2", "-.5"],
+    [arglet.flag("five", "5", "Five times")]
+  )
+  assert args.flags == ["five"]
+  assert args.positionals == ["-2", "-.5"]
+}
+
+test "values preserve unicode and every equals sign" {
+  assert _parse(["--output=café/λ.txt"]).get("output") == Some("café/λ.txt")
+  assert _parse(["--define==a=b="]).get("define") == Some("=a=b=")
+}
+
+test "unicode short names remain a single switch" {
+  let assert Ok(args) = arglet.parse(
+    ["-λλ"],
+    [arglet.flag("lambda", "λ", "A small function")]
+  )
+  assert args.count("lambda") == 2
+}
+
+test "usage handles an empty list and options without short names" {
+  assert arglet.usage([]) == ""
+  assert arglet.usage([arglet.flag("quiet", "", "")]) == "      --quiet"
+  assert arglet.usage([arglet.value("output", "o", "Write here")]) == "  -o, --output <value>  Write here"
+}
+
+test "error values keep their distinct types" {
+  let assert Error(arglet.UnknownOption("--other")) = arglet.parse(
+    ["--other"],
+    _expected()
+  )
+  let assert Error(arglet.UnexpectedValue("--quiet")) = arglet.parse(
+    ["--quiet="],
+    _expected()
+  )
+}
+
+test "the invocation has a runtime and a program location" {
+  let invocation = arglet.load()
+  assert invocation.runtime != ""
+  assert invocation.program != ""
+  assert invocation.arguments == arglet.arguments()
+}
